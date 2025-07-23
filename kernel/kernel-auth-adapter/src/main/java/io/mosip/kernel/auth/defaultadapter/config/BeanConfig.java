@@ -13,10 +13,13 @@ import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSession;
 
+import org.apache.http.client.config.RequestConfig;
 import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
 import org.apache.http.conn.ssl.TrustStrategy;
 import org.apache.http.impl.client.HttpClientBuilder;
 import org.apache.http.impl.client.HttpClients;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -37,15 +40,16 @@ import io.mosip.kernel.auth.defaultadapter.constant.AuthAdapterConstant;
 import io.mosip.kernel.auth.defaultadapter.helper.TokenHelper;
 import io.mosip.kernel.auth.defaultadapter.helper.TokenValidationHelper;
 import io.mosip.kernel.auth.defaultadapter.model.TokenHolder;
-import io.mosip.kernel.core.authmanager.authadapter.model.AuthUserDetails;
+import io.mosip.kernel.core.util.EmptyCheckUtils;
+import io.mosip.kernel.openid.bridge.model.AuthUserDetails;
 
 @Configuration
 @EnableScheduling
 public class BeanConfig {
-	
-	@Autowired 
-	private TokenHelper tokenHelper; 
-	
+
+	@Autowired
+	private TokenHelper tokenHelper;
+
 	@Autowired
 	private Environment environment;
 
@@ -55,16 +59,46 @@ public class BeanConfig {
 	@Value("${mosip.kernel.auth.adapter.ssl-bypass:true}")
 	private boolean sslBypass;
 
+	@Value("${mosip.kernel.http.default.restTemplate.max-connection-per-route:20}")
+	private Integer defaultRestTemplateMaxConnectionPerRoute;
+
+	@Value("${mosip.kernel.http.default.restTemplate.total-max-connections:100}")
+	private Integer defaultRestTemplateTotalMaxConnections;
+
+	@Value("${mosip.kernel.http.selftoken.restTemplate.max-connection-per-route:20}")
+	private Integer selfTokenRestTemplateMaxConnectionPerRoute;
+
+	@Value("${mosip.kernel.http.selftoken.restTemplate.total-max-connections:100}")
+	private Integer selfTokenRestTemplateTotalMaxConnections;
+
+	@Value("${mosip.kernel.http.plain.restTemplate.max-connection-per-route:20}")
+	private Integer plainRestTemplateMaxConnectionPerRoute;
+
+	@Value("${mosip.kernel.http.plain.restTemplate.total-max-connections:100}")
+	private Integer plainRestTemplateTotalMaxConnections;
+
+	@Value("${mosip.kernel.http.selftoken.restTemplate.socket-timeout:0}")
+	private Integer selfTokenRestTemplateSocketTimeout;
+
 	@Autowired
 	private TokenValidationHelper tokenValidationHelper;
 
 	@Autowired(required = false)
 	private LoadBalancerClient loadBalancerClient;
 
-	
+	private static final Logger LOGGER = LoggerFactory.getLogger(BeanConfig.class);
+
+	@SuppressWarnings("java:S5527") // added suppress for sonarcloud. 
+	// Server hostname verification is not required because of 2 reasons:
+	// 1. All services will not be enabled to reach to out side network to get data.
+	// 2. All internal service will have custom host names Eg: identity.idrepo
+	// sslBypass will be set to true by default because it will be ignore only for the restTemplate object 
+	// which will be used to reach to other servcies.  
 	@Bean
 	public RestTemplate restTemplate() throws NoSuchAlgorithmException, KeyStoreException, KeyManagementException {
-		HttpClientBuilder httpClientBuilder = HttpClients.custom().disableCookieManagement();
+		HttpClientBuilder httpClientBuilder = HttpClients.custom()
+				.setMaxConnPerRoute(defaultRestTemplateMaxConnectionPerRoute)
+				.setMaxConnTotal(defaultRestTemplateTotalMaxConnections).disableCookieManagement();
 		RestTemplate restTemplate = null;
 		if (sslBypass) {
 			TrustStrategy acceptingTrustStrategy = (X509Certificate[] chain, String authType) -> true;
@@ -88,8 +122,13 @@ public class BeanConfig {
 	// this is just used by client token interceptor to call to renew and validate
 	// token
 	@Bean
-	public RestTemplate plainRestTemplate() {
-		RestTemplate template = new RestTemplate();
+	public RestTemplate plainRestTemplate() throws NoSuchAlgorithmException, KeyStoreException, KeyManagementException{
+		HttpClientBuilder httpClientBuilder = HttpClients.custom()
+				.setMaxConnPerRoute(plainRestTemplateMaxConnectionPerRoute)
+				.setMaxConnTotal(plainRestTemplateTotalMaxConnections).disableCookieManagement();
+		HttpComponentsClientHttpRequestFactory requestFactory = new HttpComponentsClientHttpRequestFactory();
+		requestFactory.setHttpClient(httpClientBuilder.build());
+		RestTemplate template = new RestTemplate(requestFactory);
 		template.setInterceptors(Collections.singletonList(defaultInterceptor));
 		return template;
 	}
@@ -99,12 +138,15 @@ public class BeanConfig {
 		return new TokenHolder<>();
 	}
 
+	@SuppressWarnings("java:S5527") // added suppress for sonarcloud.
+	// Refer comments above.
 	@Bean
-	public RestTemplate selfTokenRestTemplate(
-			@Autowired @Qualifier("plainRestTemplate") RestTemplate plainRestTemplate,
-			@Autowired TokenHolder<String> cachedTokenObject
-			) throws NoSuchAlgorithmException, KeyStoreException, KeyManagementException {
-		HttpClientBuilder httpClientBuilder = HttpClients.custom().disableCookieManagement();
+	public RestTemplate selfTokenRestTemplate(@Autowired @Qualifier("plainRestTemplate") RestTemplate plainRestTemplate,
+			@Autowired TokenHolder<String> cachedTokenObject)
+			throws NoSuchAlgorithmException, KeyStoreException, KeyManagementException {
+		HttpClientBuilder httpClientBuilder = HttpClients.custom()
+				.setMaxConnPerRoute(selfTokenRestTemplateMaxConnectionPerRoute)
+				.setMaxConnTotal(selfTokenRestTemplateTotalMaxConnections).disableCookieManagement();
 		RestTemplate restTemplate = null;
 		if (sslBypass) {
 			TrustStrategy acceptingTrustStrategy = (X509Certificate[] chain, String authType) -> true;
@@ -117,23 +159,29 @@ public class BeanConfig {
 			});
 			httpClientBuilder.setSSLSocketFactory(csf);
 		}
+		//Setting the timeout in case reading data from socket takes more time
+		if(selfTokenRestTemplateSocketTimeout > 0){
+			LOGGER.info("Setting selfTokenRestTemplateSocketTimeout :"+ selfTokenRestTemplateSocketTimeout);
+			RequestConfig config = RequestConfig.custom().setSocketTimeout(selfTokenRestTemplateSocketTimeout).build();
+			httpClientBuilder.setDefaultRequestConfig(config);
+		}
 		String applName = getApplicationName();
 		HttpComponentsClientHttpRequestFactory requestFactory = new HttpComponentsClientHttpRequestFactory();
 		requestFactory.setHttpClient(httpClientBuilder.build());
 		restTemplate = new RestTemplate(requestFactory);
-		restTemplate.setInterceptors(Collections
-				.singletonList(new SelfTokenRestInterceptor(environment, plainRestTemplate, cachedTokenObject, tokenHelper, 
-					tokenValidationHelper, applName)));
+		restTemplate.setInterceptors(Collections.singletonList(new SelfTokenRestInterceptor(environment,
+				plainRestTemplate, cachedTokenObject, tokenHelper, tokenValidationHelper, applName)));
 		// interceptor added in RestTemplatePostProcessor
 		return restTemplate;
 	}
 
 	@Bean
 	public WebClient plainWebClient() {
-		ExchangeFilterFunction filterFunction = (loadBalancerClient != null) ? new LoadBalancerExchangeFilterFunction(loadBalancerClient) :
-												(req, next) -> {
-													return next.exchange(req);
-												};
+		ExchangeFilterFunction filterFunction = (loadBalancerClient != null)
+				? new LoadBalancerExchangeFilterFunction(loadBalancerClient)
+				: (req, next) -> {
+					return next.exchange(req);
+				};
 		return WebClient.builder().filter(filterFunction).build();
 	}
 
@@ -147,14 +195,14 @@ public class BeanConfig {
 
 	@Bean
 	public WebClient webClient() {
-		
+
 		return WebClient.builder().filter((req, next) -> {
 			ClientRequest filtered = null;
 			if (SecurityContextHolder.getContext() != null
 					&& SecurityContextHolder.getContext().getAuthentication().getPrincipal() != null
 					&& SecurityContextHolder.getContext().getAuthentication()
 							.getPrincipal() instanceof AuthUserDetails) {
-				AuthUserDetails userDetail = (AuthUserDetails) SecurityContextHolder.getContext().getAuthentication()
+				io.mosip.kernel.openid.bridge.model.AuthUserDetails userDetail = (AuthUserDetails) SecurityContextHolder.getContext().getAuthentication()
 						.getPrincipal();
 				filtered = ClientRequest.from(req).header(AuthAdapterConstant.AUTH_HEADER_COOKIE,
 						AuthAdapterConstant.AUTH_HEADER + userDetail.getToken()).build();
@@ -164,17 +212,21 @@ public class BeanConfig {
 	}
 
 	@Bean
-	public WebClient selfTokenWebClient(
-			@Autowired @Qualifier("plainWebClient") WebClient plainWebClient,
+	public WebClient selfTokenWebClient(@Autowired @Qualifier("plainWebClient") WebClient plainWebClient,
 			@Autowired TokenHolder<String> cachedTokenObject) {
 		String applName = getApplicationName();
-		return WebClient.builder().filter(new SelfTokenExchangeFilterFunction(environment, plainWebClient, cachedTokenObject, 
-				tokenHelper, tokenValidationHelper, applName)).build();
+		return WebClient.builder().filter(new SelfTokenExchangeFilterFunction(environment, plainWebClient,
+				cachedTokenObject, tokenHelper, tokenValidationHelper, applName)).build();
 	}
 
+	@SuppressWarnings("java:S2259") // added suppress for sonarcloud. Null check is performed at line # 211
 	private String getApplicationName() {
 		String appNames = environment.getProperty("spring.application.name");
-		List<String> appNamesList = Stream.of(appNames.split(",")).collect(Collectors.toList());
-		return appNamesList.get(0);
+		if (!EmptyCheckUtils.isNullEmpty(appNames)) {
+			List<String> appNamesList = Stream.of(appNames.split(",")).collect(Collectors.toList());
+			return appNamesList.get(0);
+		} else {
+			throw new RuntimeException("Property spring.application.name not found");
+		}
 	}
 }
