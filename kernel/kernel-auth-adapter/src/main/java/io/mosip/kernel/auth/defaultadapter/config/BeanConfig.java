@@ -13,6 +13,7 @@ import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSession;
 
+import org.apache.http.client.config.RequestConfig;
 import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
 import org.apache.http.conn.ssl.TrustStrategy;
 import org.apache.http.impl.client.HttpClientBuilder;
@@ -39,6 +40,9 @@ import io.mosip.kernel.auth.defaultadapter.helper.TokenValidationHelper;
 import io.mosip.kernel.auth.defaultadapter.model.TokenHolder;
 import io.mosip.kernel.core.util.EmptyCheckUtils;
 import io.mosip.kernel.openid.bridge.model.AuthUserDetails;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 
 @Configuration
 @EnableScheduling
@@ -73,9 +77,14 @@ public class BeanConfig {
 
 	@Value("${mosip.kernel.http.plain.restTemplate.total-max-connections:100}")
 	private Integer plainRestTemplateTotalMaxConnections;
+	
+	@Value("${mosip.kernel.http.selftoken.restTemplate.socket-timeout:0}")
+	private Integer selfTokenRestTemplateSocketTimeout;
 
 	@Autowired
 	private TokenValidationHelper tokenValidationHelper;
+	
+	private static final Logger LOGGER = LoggerFactory.getLogger(BeanConfig.class);
 
 	@Autowired(required = false)
 	private LoadBalancerClient loadBalancerClient;
@@ -151,6 +160,12 @@ public class BeanConfig {
 			});
 			httpClientBuilder.setSSLSocketFactory(csf);
 		}
+		//Setting the timeout in case reading data from socket takes more time
+				if(selfTokenRestTemplateSocketTimeout > 0){
+					LOGGER.info("Setting selfTokenRestTemplateSocketTimeout :"+ selfTokenRestTemplateSocketTimeout);
+					RequestConfig config = RequestConfig.custom().setSocketTimeout(selfTokenRestTemplateSocketTimeout).build();
+					httpClientBuilder.setDefaultRequestConfig(config);
+				}
 		String applName = getApplicationName();
 		HttpComponentsClientHttpRequestFactory requestFactory = new HttpComponentsClientHttpRequestFactory();
 		requestFactory.setHttpClient(httpClientBuilder.build());
